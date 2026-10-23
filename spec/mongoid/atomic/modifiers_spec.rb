@@ -319,6 +319,20 @@ describe Mongoid::Atomic::Modifiers do
           expect(modifiers[:conflicts].keys).to eq(%w[$pull $addToSet])
         end
       end
+
+      context 'when a conflicting unset is already in the conflicts hash' do
+        before do
+          modifiers.set({ 'addresses.0.street' => 'Bond' })
+          modifiers.unset([ 'addresses.1.name' ])
+          modifiers.push({ 'addresses' => { 'street' => 'Oxford' } })
+          modifiers.add_to_set({ 'addresses.1.tags' => %w[one] })
+          modifiers.pull({ 'addresses.1.locations' => { '_id' => { '$in' => [ 'two' ] } } })
+        end
+
+        it 'keeps the unset before the pull' do
+          expect(modifiers[:conflicts].keys).to eq(%w[$unset $pull $push $addToSet])
+        end
+      end
     end
   end
 

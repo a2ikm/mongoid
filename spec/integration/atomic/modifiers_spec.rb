@@ -364,10 +364,43 @@ describe Mongoid::Atomic::Modifiers do
         roster.reload
       end
 
-      it 'applies the $set after the nested $pull' do
+      it 'applies the changes to the remaining documents' do
         expect(roster.players.map(&:nickname)).to eq(%w[B c])
         expect(roster.players[1].awards.map(&:name)).to eq([ 'Second' ])
       end
+    end
+  end
+
+  context 'when removing a field of a remaining nested document after pulling its sibling' do
+    let(:roster) do
+      ModifierModels::Roster.create!(players: [
+                                       ModifierModels::Player.new(nickname: 'b'),
+                                       ModifierModels::Player.new(
+                                         nickname: 'c',
+                                         awards: %w[first second third].map { |name| ModifierModels::Award.new(name: name) }
+                                       )
+                                     ])
+    end
+
+    before do
+      roster.reload
+      first_player, second_player = roster.players.to_a
+      first_award, second_award, = second_player.awards.to_a
+      # The $set on the first player moves both $unsets into the conflicts.
+      first_player.nickname = 'B'
+      second_player.remove_attribute(:nickname)
+      roster.players_attributes = [
+        { id: second_player.id, awards_attributes: [ { id: first_award.id, _destroy: true } ] }
+      ]
+      # The key is recorded while the second award is still at index 1.
+      second_award.remove_attribute(:name)
+      roster.save!
+      roster.reload
+    end
+
+    it 'removes the field from the right document' do
+      expect(roster.players.map(&:nickname)).to eq([ 'B', nil ])
+      expect(roster.players[1].awards.map(&:name)).to eq([ nil, 'third' ])
     end
   end
 

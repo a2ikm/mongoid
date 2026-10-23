@@ -274,10 +274,12 @@ module Mongoid
       def conflicting_pulls
         return conflicts['$pull'] if conflicts.has_key?('$pull')
 
-        # Conflicts are applied in hash order. The other conflicting writes
-        # use positions computed after the pull, so the $pull has to come
-        # first.
-        self[:conflicts] = { '$pull' => {} }.merge(conflicts)
+        # Conflicts are applied in hash order. The $set, $addToSet and
+        # $pullAll keys are built after the flagged documents are removed and
+        # the rest reindexed, so the $pull has to come before them. A $unset
+        # that is already there stays before the $pull: #remove_attribute
+        # records its key with the position from before the removal.
+        self[:conflicts] = conflicts.slice('$unset').merge('$pull' => {}).merge(conflicts)
         conflicts['$pull']
       end
 
