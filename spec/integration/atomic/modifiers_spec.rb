@@ -232,6 +232,145 @@ describe Mongoid::Atomic::Modifiers do
     end
   end
 
+  context 'when changing foreign keys of a remaining nested document after pulling its sibling' do
+    let(:badges) { Array.new(2) { ModifierModels::Badge.create! } }
+    let(:roster) do
+      ModifierModels::Roster.create!(players: [
+                                       ModifierModels::Player.new(badges: [ badges[0] ]),
+                                       ModifierModels::Player.new(
+                                         badges: [ badges[0] ],
+                                         awards: [
+                                           ModifierModels::Award.new(name: 'first', badges: [ badges[0] ]),
+                                           ModifierModels::Award.new(name: 'second', badges: [ badges[0] ])
+                                         ]
+                                       )
+                                     ])
+    end
+
+    before do
+      roster.reload
+      first_player, second_player = roster.players.to_a
+      first_award, second_award = second_player.awards.to_a
+      # The change on the first player moves the nested $pull into a
+      # separate write.
+      change.call(first_player)
+      roster.players_attributes = [
+        { id: second_player.id, awards_attributes: [ { id: first_award.id, _destroy: true } ] }
+      ]
+      change.call(second_award)
+      roster.save!
+      roster.reload
+    end
+
+    context 'when adding to the foreign keys' do
+      let(:change) do
+        ->(doc) { doc.badge_ids = doc.badge_ids + [ badges[1].id ] }
+      end
+
+      it 'applies the change to the remaining nested document' do
+        expect(roster.players[0].badge_ids).to eq([ badges[0].id, badges[1].id ])
+        expect(roster.players[1].awards.map(&:name)).to eq([ 'second' ])
+        expect(roster.players[1].awards[0].badge_ids).to eq([ badges[0].id, badges[1].id ])
+      end
+    end
+
+    context 'when removing from the foreign keys' do
+      let(:change) do
+        ->(doc) { doc.badge_ids = [] }
+      end
+
+      it 'applies the change to the remaining nested document' do
+        expect(roster.players[0].badge_ids).to eq([])
+        expect(roster.players[1].awards.map(&:name)).to eq([ 'second' ])
+        expect(roster.players[1].awards[0].badge_ids).to eq([])
+      end
+    end
+  end
+
+  context 'when changing the following siblings after pulling a preceding sibling' do
+    let(:badges) { Array.new(2) { ModifierModels::Badge.create! } }
+    let(:roster) do
+      ModifierModels::Roster.create!(players: [
+                                       ModifierModels::Player.new(nickname: 'a', badges: [ badges[0] ]),
+                                       ModifierModels::Player.new(nickname: 'b', badges: [ badges[0] ]),
+                                       ModifierModels::Player.new(
+                                         nickname: 'c',
+                                         badges: [ badges[0] ],
+                                         awards: [
+                                           ModifierModels::Award.new(name: 'first', badges: [ badges[0] ]),
+                                           ModifierModels::Award.new(name: 'second', badges: [ badges[0] ])
+                                         ]
+                                       )
+                                     ])
+    end
+
+    before do
+      roster.reload
+    end
+
+    context 'when changing the foreign keys of the following siblings' do
+      before do
+        first_player, second_player, third_player = roster.players.to_a
+        second_player.badge_ids = second_player.badge_ids + [ badges[1].id ]
+        third_player.badge_ids = []
+        roster.players_attributes = [ { id: first_player.id, _destroy: true } ]
+        roster.save!
+        roster.reload
+      end
+
+      it 'applies the changes to the following siblings' do
+        expect(roster.players.map(&:nickname)).to eq(%w[b c])
+        expect(roster.players[0].badge_ids).to eq([ badges[0].id, badges[1].id ])
+        expect(roster.players[1].badge_ids).to eq([])
+      end
+    end
+
+    context 'when also pulling a nested document of a following sibling' do
+      before do
+        first_player, second_player, third_player = roster.players.to_a
+        first_award, second_award = third_player.awards.to_a
+        second_player.badge_ids = second_player.badge_ids + [ badges[1].id ]
+        roster.players_attributes = [
+          { id: first_player.id, _destroy: true },
+          { id: third_player.id, awards_attributes: [ { id: first_award.id, _destroy: true } ] }
+        ]
+        second_award.badge_ids = second_award.badge_ids + [ badges[1].id ]
+        roster.save!
+        roster.reload
+      end
+
+      it 'applies the changes to the remaining documents' do
+        expect(roster.players.map(&:nickname)).to eq(%w[b c])
+        expect(roster.players[0].badge_ids).to eq([ badges[0].id, badges[1].id ])
+        expect(roster.players[1].awards.map(&:name)).to eq([ 'second' ])
+        expect(roster.players[1].awards[0].badge_ids).to eq([ badges[0].id, badges[1].id ])
+      end
+    end
+
+    context 'when setting fields of the remaining documents' do
+      before do
+        first_player, second_player, third_player = roster.players.to_a
+        first_award, second_award = third_player.awards.to_a
+        roster.players_attributes = [
+          { id: first_player.id, _destroy: true },
+          { id: second_player.id, nickname: 'B' },
+          { id: third_player.id,
+            awards_attributes: [
+              { id: first_award.id, _destroy: true },
+              { id: second_award.id, name: 'Second' }
+            ] }
+        ]
+        roster.save!
+        roster.reload
+      end
+
+      it 'applies the $set after the nested $pull' do
+        expect(roster.players.map(&:nickname)).to eq(%w[B c])
+        expect(roster.players[1].awards.map(&:name)).to eq([ 'Second' ])
+      end
+    end
+  end
+
   context 'when assigning embeds_many attributes on a new embedded document' do
     let(:cabinet) do
       ModifierModels::Cabinet.create!
