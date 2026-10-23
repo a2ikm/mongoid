@@ -206,17 +206,19 @@ module Mongoid
 
       # Is the operation going to be a conflict for an $addToSet?
       #
-      # As with $push, an $addToSet is only split out when the other
-      # operation does not shift array element positions. A conflicting
-      # $pull is left as-is so MongoDB rejects the update rather than the
-      # $addToSet possibly hitting a different element in a separate write.
+      # An $addToSet path is built after the flagged destroys have been
+      # processed and the remaining documents reindexed, so it already
+      # points at the position the document has once the $pull is applied.
+      # It is therefore split out when it conflicts with a $pull, and the
+      # conflicting writes are applied after the $pull.
       #
       # @param [ String ] field The field.
       #
       # @return [ true | false ] If this field is a conflict.
       def add_to_set_conflict?(field)
         name = field.split('.', 2)[0]
-        set_fields.has_key?(name) || push_fields.has_key?(name)
+        set_fields.has_key?(name) || push_fields.has_key?(name) ||
+          pull_root?(name)
       end
 
       # Is the operation going to be a conflict for a $pull?
@@ -270,7 +272,13 @@ module Mongoid
       #
       # @return [ Hash ] The conflicting pull operations.
       def conflicting_pulls
-        conflicts['$pull'] ||= {}
+        return conflicts['$pull'] if conflicts.has_key?('$pull')
+
+        # Conflicts are applied in hash order. The other conflicting writes
+        # use positions computed after the pull, so the $pull has to come
+        # first.
+        self[:conflicts] = { '$pull' => {} }.merge(conflicts)
+        conflicts['$pull']
       end
 
       # Get the conflicting pull all modifications.
@@ -422,14 +430,16 @@ module Mongoid
         self['$unset'] ||= {}
       end
 
-      # Is there a $pull on the given root-level field? Does not initialize
-      # the $pull operations.
+      # Is there a $pull on the given root-level field, either in the main
+      # update or in the conflicts? Does not initialize the $pull operations.
       #
       # @param [ String ] name The root-level field name.
       #
       # @return [ true | false ] If a $pull touches this field.
       def pull_root?(name)
-        (self['$pull'] || {}).keys.any? { |key| key.split('.', 2)[0] == name }
+        [ self['$pull'], (self[:conflicts] || {})['$pull'] ].compact.any? do |mods|
+          mods.keys.any? { |key| key.split('.', 2)[0] == name }
+        end
       end
 
       # Is there a $pullAll on the given root-level field? Does not
